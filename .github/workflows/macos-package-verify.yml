@@ -109,44 +109,17 @@ jobs:
           set -euo pipefail
           mkdir -p sample-app
 
-          if [[ "${{ inputs.production_signature_checks || inputs.self_signed_signature_checks }}" == "true" ]]; then
-            cat > sample-app/smoke.c <<'EOF'
-          #include <stdio.h>
-
-          int main(void) {
-            puts("Hello from signed app");
-            return 0;
-          }
-          EOF
-
-            clang sample-app/smoke.c -o sample-app/smoke
-            rm -f sample-app/smoke.c
-            chmod +x sample-app/smoke
-
-            cat > sample-app/readme.txt <<'EOF'
-          distromate package signature smoke test
-          EOF
-
-            cat > sample-app/distromate.yaml <<'EOF'
-          appid: test-appid
-          name: Distromate Smoke Test
-          description: Verify macOS dmg packaging workflow
-          package:
-            name: smoke-app
-            executable: smoke
-          EOF
-          else
-            cat > sample-app/hello.sh <<'EOF'
+          cat > sample-app/hello.sh <<'EOF'
           #!/usr/bin/env bash
           echo "Hello from packaged app"
           EOF
-            chmod +x sample-app/hello.sh
+          chmod +x sample-app/hello.sh
 
-            cat > sample-app/readme.txt <<'EOF'
+          cat > sample-app/readme.txt <<'EOF'
           distromate package smoke test
           EOF
 
-            cat > sample-app/distromate.yaml <<'EOF'
+          cat > sample-app/distromate.yaml <<'EOF'
           appid: test-appid
           name: Distromate Smoke Test
           description: Verify macOS dmg packaging workflow
@@ -154,7 +127,6 @@ jobs:
             name: smoke-app
             executable: hello.sh
           EOF
-          fi
 
           ls -la sample-app
 
@@ -238,37 +210,6 @@ jobs:
 
           spctl --assess --type execute --verbose=4 "$target"
 
-      - name: Sign sample executable with Developer ID
-        if: ${{ inputs.production_signature_checks }}
-        shell: bash
-        env:
-          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
-        run: |
-          set -euo pipefail
-
-          binary_path="sample-app/smoke"
-          codesign --force --options runtime --timestamp --sign "$MACOS_CODESIGN_IDENTITY" "$binary_path"
-          codesign --verify --strict --verbose=4 "$binary_path"
-          codesign -dv --verbose=4 "$binary_path" 2>&1
-
-      - name: Sign sample executable with ad-hoc signature
-        if: ${{ inputs.self_signed_signature_checks && !inputs.production_signature_checks }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          binary_path="sample-app/smoke"
-          codesign --force --sign - "$binary_path"
-          codesign --verify --strict --verbose=4 "$binary_path"
-
-          app_sign_info="$(codesign -dv --verbose=4 "$binary_path" 2>&1)"
-          printf '%s\n' "$app_sign_info"
-
-          if ! printf '%s\n' "$app_sign_info" | grep -q '^Signature=adhoc'; then
-            echo "::error::Sample executable is not ad-hoc signed"
-            exit 1
-          fi
-
       - name: Run package command
         shell: bash
         run: |
@@ -277,11 +218,47 @@ jobs:
           ../distromate package -v "${{ inputs.app_version }}" -o out --debug 2>&1 | tee package-command.log
 
           if [[ "${{ inputs.production_signature_checks || inputs.self_signed_signature_checks }}" == "true" ]]; then
+            grep -q "更新前签名校验通过" package-command.log
             grep -q "更新后签名校验通过" package-command.log
             grep -q "launcher/updater 全量DMG自动更新、拉起与签名校验测试通过" package-command.log
           fi
 
           popd >/dev/null
+
+      - name: Sign generated DMG with Developer ID
+        if: ${{ inputs.production_signature_checks }}
+        shell: bash
+        env:
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          EXPECTED_TEAM_ID: ${{ inputs.expected_team_id }}
+        run: |
+          set -euo pipefail
+
+          dmg="sample-app/out/smoke-app-Setup-${{ inputs.app_version }}.dmg"
+          test -f "$dmg"
+
+          codesign --force --options runtime --timestamp --sign "$MACOS_CODESIGN_IDENTITY" "$dmg"
+          codesign --verify --verbose=4 "$dmg"
+
+          dmg_sign_info="$(codesign -dv --verbose=4 "$dmg" 2>&1)"
+          printf '%s\n' "$dmg_sign_info"
+
+          if ! printf '%s\n' "$dmg_sign_info" | grep -q '^Authority=Developer ID Application:'; then
+            echo "::error::Generated DMG is not signed with Developer ID Application certificate"
+            exit 1
+          fi
+
+          team_line="$(printf '%s\n' "$dmg_sign_info" | grep '^TeamIdentifier=' | head -n1 || true)"
+          team_id="${team_line#TeamIdentifier=}"
+          if [[ -z "$team_id" || "$team_id" == "not set" ]]; then
+            echo "::error::Generated DMG TeamIdentifier missing"
+            exit 1
+          fi
+
+          if [[ -n "$EXPECTED_TEAM_ID" && "$team_id" != "$EXPECTED_TEAM_ID" ]]; then
+            echo "::error::Generated DMG TeamIdentifier mismatch: expected=$EXPECTED_TEAM_ID actual=$team_id"
+            exit 1
+          fi
 
       - name: Sign generated DMG with ad-hoc signature
         if: ${{ inputs.self_signed_signature_checks && !inputs.production_signature_checks }}
@@ -363,24 +340,17 @@ jobs:
           hdiutil attach "$dmg" -nobrowse -mountpoint "$mount_dir"
           ls -la "$mount_dir"
 
+          test -f "$mount_dir/hello.sh"
+          test -f "$mount_dir/readme.txt"
           test -L "$mount_dir/Applications"
 
-          if [[ "${{ inputs.production_signature_checks || inputs.self_signed_signature_checks }}" == "true" ]]; then
-            test -f "$mount_dir/smoke"
-            run_output="$("$mount_dir/smoke")"
-            echo "Mounted executable output: $run_output"
-            test "$run_output" = "Hello from signed app"
-          else
-            test -f "$mount_dir/hello.sh"
-            test -f "$mount_dir/readme.txt"
-            run_output="$("$mount_dir/hello.sh")"
-            echo "Mounted executable output: $run_output"
-            test "$run_output" = "Hello from packaged app"
-          fi
+          run_output="$("$mount_dir/hello.sh")"
+          echo "Mounted executable output: $run_output"
+          test "$run_output" = "Hello from packaged app"
 
           echo "DMG check passed: $dmg"
 
-      - name: Verify production signature trust on packaged executable
+      - name: Verify production signature trust on generated DMG
         if: ${{ inputs.production_signature_checks }}
         shell: bash
         run: |
@@ -389,35 +359,27 @@ jobs:
           dmg="sample-app/out/smoke-app-Setup-${{ inputs.app_version }}.dmg"
           expected_team="${{ inputs.expected_team_id }}"
 
-          mount_dir="$(mktemp -d)"
-          trap 'hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rm -rf "$mount_dir"' EXIT
+          codesign --verify --verbose=4 "$dmg"
 
-          hdiutil attach "$dmg" -nobrowse -mountpoint "$mount_dir"
-
-          bin_path="$mount_dir/smoke"
-          codesign --verify --strict --verbose=4 "$bin_path"
-
-          sign_info="$(codesign -dv --verbose=4 "$bin_path" 2>&1)"
+          sign_info="$(codesign -dv --verbose=4 "$dmg" 2>&1)"
           printf '%s\n' "$sign_info"
 
           if ! printf '%s\n' "$sign_info" | grep -q '^Authority=Developer ID Application:'; then
-            echo "::error::Packaged executable is not signed with Developer ID Application certificate"
+            echo "::error::Generated DMG is not signed with Developer ID Application certificate"
             exit 1
           fi
 
           team_line="$(printf '%s\n' "$sign_info" | grep '^TeamIdentifier=' | head -n1 || true)"
           team_id="${team_line#TeamIdentifier=}"
           if [[ -z "$team_id" || "$team_id" == "not set" ]]; then
-            echo "::error::Packaged executable TeamIdentifier missing (ad-hoc signature is not allowed)"
+            echo "::error::Generated DMG TeamIdentifier missing"
             exit 1
           fi
 
           if [[ -n "$expected_team" && "$team_id" != "$expected_team" ]]; then
-            echo "::error::Packaged executable TeamIdentifier mismatch: expected=$expected_team actual=$team_id"
+            echo "::error::Generated DMG TeamIdentifier mismatch: expected=$expected_team actual=$team_id"
             exit 1
           fi
-
-          spctl --assess --type execute --verbose=4 "$bin_path"
 
           if [[ "${{ inputs.require_notarization }}" == "true" ]]; then
             xcrun stapler validate "$dmg"
@@ -441,21 +403,6 @@ jobs:
           printf '%s\n' "$dmg_sign_info"
           if ! printf '%s\n' "$dmg_sign_info" | grep -q '^Signature=adhoc'; then
             echo "::error::Packaged DMG signature is not ad-hoc"
-            exit 1
-          fi
-
-          mount_dir="$(mktemp -d)"
-          trap 'hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rm -rf "$mount_dir"' EXIT
-
-          hdiutil attach "$dmg" -nobrowse -mountpoint "$mount_dir"
-
-          bin_path="$mount_dir/smoke"
-          codesign --verify --strict --verbose=4 "$bin_path"
-
-          bin_sign_info="$(codesign -dv --verbose=4 "$bin_path" 2>&1)"
-          printf '%s\n' "$bin_sign_info"
-          if ! printf '%s\n' "$bin_sign_info" | grep -q '^Signature=adhoc'; then
-            echo "::error::Packaged executable signature is not ad-hoc"
             exit 1
           fi
 
