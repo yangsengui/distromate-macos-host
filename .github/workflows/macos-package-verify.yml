@@ -1,0 +1,155 @@
+name: Verify distromate package (macOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag that contains distromate-darwin-* binaries
+        required: true
+        default: macos-local-f097f57-20260211063432
+      runner:
+        description: macOS runner version
+        required: true
+        default: macos-14
+        type: choice
+        options:
+          - macos-14
+          - macos-15
+          - macos-13
+      binary_arch:
+        description: distromate binary arch (auto uses runner arch)
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - amd64
+          - arm64
+      app_version:
+        description: Test app version used in package command
+        required: true
+        default: 0.0.1
+      debug_enabled:
+        description: Start tmate session after failure
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  package-test:
+    name: Package test on ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Resolve binary asset
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          arch_input="${{ inputs.binary_arch }}"
+          if [[ "$arch_input" == "auto" ]]; then
+            case "$(uname -m)" in
+              arm64|aarch64) arch="arm64" ;;
+              x86_64|amd64) arch="amd64" ;;
+              *)
+                echo "Unsupported runner arch: $(uname -m)"
+                exit 1
+                ;;
+            esac
+          else
+            arch="$arch_input"
+          fi
+
+          asset="distromate-darwin-${arch}"
+          url="https://github.com/${{ github.repository }}/releases/download/${{ inputs.release_tag }}/${asset}"
+
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+          echo "Runner arch: $(uname -m)"
+          echo "Binary arch: $arch"
+          echo "Asset: $asset"
+
+      - name: Download distromate binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL "${{ steps.resolve.outputs.url }}" -o distromate
+          chmod +x distromate
+          ./distromate --version
+
+      - name: Prepare minimal package project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sample-app
+
+          cat > sample-app/hello.sh <<'EOF'
+          #!/usr/bin/env bash
+          echo "Hello from packaged app"
+          EOF
+          chmod +x sample-app/hello.sh
+
+          cat > sample-app/readme.txt <<'EOF'
+          distromate package smoke test
+          EOF
+
+          cat > sample-app/distromate.yaml <<'EOF'
+          appid: test-appid
+          name: Distromate Smoke Test
+          description: Verify macOS dmg packaging workflow
+          package:
+            name: smoke-app
+            executable: hello.sh
+          EOF
+
+          ls -la sample-app
+
+      - name: Run package command
+        shell: bash
+        run: |
+          set -euo pipefail
+          pushd sample-app >/dev/null
+          ../distromate package -v "${{ inputs.app_version }}" -o out --debug
+          popd >/dev/null
+
+      - name: Verify DMG content
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg="sample-app/out/smoke-app-Setup-${{ inputs.app_version }}.dmg"
+          test -f "$dmg"
+
+          hdiutil verify "$dmg"
+
+          mount_dir="$(mktemp -d)"
+          trap 'hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rm -rf "$mount_dir"' EXIT
+
+          hdiutil attach "$dmg" -nobrowse -mountpoint "$mount_dir"
+          ls -la "$mount_dir"
+
+          test -f "$mount_dir/hello.sh"
+          test -f "$mount_dir/readme.txt"
+          test -L "$mount_dir/Applications"
+
+          echo "DMG check passed: $dmg"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-dmg-${{ inputs.runner }}-${{ steps.resolve.outputs.arch }}
+          path: sample-app/out/*.dmg
+          if-no-files-found: error
+
+      - name: Start tmate session for debug
+        if: ${{ failure() && inputs.debug_enabled }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
