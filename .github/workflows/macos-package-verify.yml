@@ -34,6 +34,20 @@ on:
         type: boolean
         required: false
         default: false
+      production_signature_checks:
+        description: Enable production-grade signature trust checks
+        type: boolean
+        required: false
+        default: false
+      expected_team_id:
+        description: Expected TeamIdentifier (optional, recommended)
+        required: false
+        default: ""
+      require_notarization:
+        description: Require notarization submit/staple/assessment
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -84,32 +98,177 @@ jobs:
           chmod +x distromate
           ./distromate --version
 
-      - name: Prepare minimal package project
+      - name: Prepare sample package project
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p sample-app
 
-          cat > sample-app/hello.sh <<'EOF'
-          #!/usr/bin/env bash
-          echo "Hello from packaged app"
-          EOF
-          chmod +x sample-app/hello.sh
+          if [[ "${{ inputs.production_signature_checks }}" == "true" ]]; then
+            mkdir -p sample-app/Smoke.app/Contents/MacOS
+            mkdir -p sample-app/Smoke.app/Contents/Resources
 
-          cat > sample-app/readme.txt <<'EOF'
-          distromate package smoke test
-          EOF
+            cat > sample-app/Smoke.app/Contents/MacOS/smoke.c <<'EOF'
+            #include <stdio.h>
 
-          cat > sample-app/distromate.yaml <<'EOF'
-          appid: test-appid
-          name: Distromate Smoke Test
-          description: Verify macOS dmg packaging workflow
-          package:
-            name: smoke-app
-            executable: hello.sh
-          EOF
+            int main(void) {
+              puts("Hello from signed app");
+              return 0;
+            }
+            EOF
+
+            clang sample-app/Smoke.app/Contents/MacOS/smoke.c -o sample-app/Smoke.app/Contents/MacOS/smoke
+            rm -f sample-app/Smoke.app/Contents/MacOS/smoke.c
+            chmod +x sample-app/Smoke.app/Contents/MacOS/smoke
+
+            cat > sample-app/Smoke.app/Contents/Info.plist <<'EOF'
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+              <key>CFBundleName</key>
+              <string>Distromate Smoke Test</string>
+              <key>CFBundleDisplayName</key>
+              <string>Distromate Smoke Test</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.distromate.smoke</string>
+              <key>CFBundleVersion</key>
+              <string>${{ inputs.app_version }}</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${{ inputs.app_version }}</string>
+              <key>CFBundleExecutable</key>
+              <string>smoke</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>12.0</string>
+            </dict>
+            </plist>
+            EOF
+
+            cat > sample-app/distromate.yaml <<'EOF'
+            appid: test-appid
+            name: Distromate Smoke Test
+            description: Verify macOS dmg packaging workflow
+            package:
+              name: smoke-app
+              executable: Smoke.app/Contents/MacOS/smoke
+            EOF
+          else
+            cat > sample-app/hello.sh <<'EOF'
+            #!/usr/bin/env bash
+            echo "Hello from packaged app"
+            EOF
+            chmod +x sample-app/hello.sh
+
+            cat > sample-app/readme.txt <<'EOF'
+            distromate package smoke test
+            EOF
+
+            cat > sample-app/distromate.yaml <<'EOF'
+            appid: test-appid
+            name: Distromate Smoke Test
+            description: Verify macOS dmg packaging workflow
+            package:
+              name: smoke-app
+              executable: hello.sh
+            EOF
+          fi
 
           ls -la sample-app
+
+      - name: Validate signing secrets
+        if: ${{ inputs.production_signature_checks }}
+        shell: bash
+        env:
+          MACOS_CODESIGN_P12_BASE64: ${{ secrets.MACOS_CODESIGN_P12_BASE64 }}
+          MACOS_CODESIGN_P12_PASSWORD: ${{ secrets.MACOS_CODESIGN_P12_PASSWORD }}
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for key in MACOS_CODESIGN_P12_BASE64 MACOS_CODESIGN_P12_PASSWORD MACOS_CODESIGN_IDENTITY; do
+            if [[ -z "${!key:-}" ]]; then
+              echo "::error::Missing required secret: $key"
+              missing=1
+            fi
+          done
+
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Import signing certificate
+        if: ${{ inputs.production_signature_checks }}
+        shell: bash
+        env:
+          MACOS_CODESIGN_P12_BASE64: ${{ secrets.MACOS_CODESIGN_P12_BASE64 }}
+          MACOS_CODESIGN_P12_PASSWORD: ${{ secrets.MACOS_CODESIGN_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          cert_path="$RUNNER_TEMP/macos_codesign.p12"
+          keychain_path="$RUNNER_TEMP/macos-build.keychain-db"
+          keychain_password="$(openssl rand -hex 20)"
+
+          echo "$MACOS_CODESIGN_P12_BASE64" | base64 --decode > "$cert_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+
+          security list-keychains -d user -s "$keychain_path"
+
+          security import "$cert_path" -k "$keychain_path" -P "$MACOS_CODESIGN_P12_PASSWORD" -A -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+
+          security find-identity -v -p codesigning "$keychain_path"
+
+      - name: Verify distromate release signature trust
+        if: ${{ inputs.production_signature_checks }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target="./distromate"
+          expected_team="${{ inputs.expected_team_id }}"
+
+          codesign --verify --strict --verbose=4 "$target"
+          sign_info="$(codesign -dv --verbose=4 "$target" 2>&1)"
+          printf '%s\n' "$sign_info"
+
+          if ! printf '%s\n' "$sign_info" | grep -q '^Authority=Developer ID Application:'; then
+            echo "::error::distromate is not signed with Developer ID Application certificate"
+            exit 1
+          fi
+
+          team_line="$(printf '%s\n' "$sign_info" | grep '^TeamIdentifier=' | head -n1 || true)"
+          team_id="${team_line#TeamIdentifier=}"
+          if [[ -z "$team_id" || "$team_id" == "not set" ]]; then
+            echo "::error::distromate TeamIdentifier missing (ad-hoc signature is not allowed)"
+            exit 1
+          fi
+
+          if [[ -n "$expected_team" && "$team_id" != "$expected_team" ]]; then
+            echo "::error::distromate TeamIdentifier mismatch: expected=$expected_team actual=$team_id"
+            exit 1
+          fi
+
+          spctl --assess --type execute --verbose=4 "$target"
+
+      - name: Sign sample app with Developer ID
+        if: ${{ inputs.production_signature_checks }}
+        shell: bash
+        env:
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+
+          app_path="sample-app/Smoke.app"
+          codesign --force --deep --options runtime --timestamp --sign "$MACOS_CODESIGN_IDENTITY" "$app_path"
+          codesign --verify --strict --deep --verbose=4 "$app_path"
+          codesign -dv --verbose=4 "$app_path" 2>&1
 
       - name: Run package command
         shell: bash
@@ -118,6 +277,50 @@ jobs:
           pushd sample-app >/dev/null
           ../distromate package -v "${{ inputs.app_version }}" -o out --debug
           popd >/dev/null
+
+      - name: Validate notarization secrets
+        if: ${{ inputs.production_signature_checks && inputs.require_notarization }}
+        shell: bash
+        env:
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for key in MACOS_NOTARY_APPLE_ID MACOS_NOTARY_TEAM_ID MACOS_NOTARY_APP_PASSWORD; do
+            if [[ -z "${!key:-}" ]]; then
+              echo "::error::Missing required secret: $key"
+              missing=1
+            fi
+          done
+
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Notarize and staple generated DMG
+        if: ${{ inputs.production_signature_checks && inputs.require_notarization }}
+        shell: bash
+        env:
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          dmg="sample-app/out/smoke-app-Setup-${{ inputs.app_version }}.dmg"
+          test -f "$dmg"
+
+          xcrun notarytool submit "$dmg" \
+            --apple-id "$MACOS_NOTARY_APPLE_ID" \
+            --team-id "$MACOS_NOTARY_TEAM_ID" \
+            --password "$MACOS_NOTARY_APP_PASSWORD" \
+            --wait
+
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
 
       - name: Verify DMG content
         shell: bash
@@ -135,15 +338,75 @@ jobs:
           hdiutil attach "$dmg" -nobrowse -mountpoint "$mount_dir"
           ls -la "$mount_dir"
 
-          test -f "$mount_dir/hello.sh"
-          test -f "$mount_dir/readme.txt"
           test -L "$mount_dir/Applications"
 
-          run_output="$($mount_dir/hello.sh)"
-          echo "Mounted executable output: $run_output"
-          test "$run_output" = "Hello from packaged app"
+          if [[ "${{ inputs.production_signature_checks }}" == "true" ]]; then
+            test -d "$mount_dir/Smoke.app"
+            test -f "$mount_dir/Smoke.app/Contents/MacOS/smoke"
+            run_output="$("$mount_dir/Smoke.app/Contents/MacOS/smoke")"
+            echo "Mounted executable output: $run_output"
+            test "$run_output" = "Hello from signed app"
+          else
+            test -f "$mount_dir/hello.sh"
+            test -f "$mount_dir/readme.txt"
+            run_output="$("$mount_dir/hello.sh")"
+            echo "Mounted executable output: $run_output"
+            test "$run_output" = "Hello from packaged app"
+          fi
 
           echo "DMG check passed: $dmg"
+
+      - name: Verify production signature trust on packaged app
+        if: ${{ inputs.production_signature_checks }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg="sample-app/out/smoke-app-Setup-${{ inputs.app_version }}.dmg"
+          expected_team="${{ inputs.expected_team_id }}"
+
+          mount_dir="$(mktemp -d)"
+          trap 'hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rm -rf "$mount_dir"' EXIT
+
+          hdiutil attach "$dmg" -nobrowse -mountpoint "$mount_dir"
+
+          app_path="$mount_dir/Smoke.app"
+          bin_path="$app_path/Contents/MacOS/smoke"
+
+          codesign --verify --strict --deep --verbose=4 "$app_path"
+          codesign --verify --strict --verbose=4 "$bin_path"
+
+          sign_info="$(codesign -dv --verbose=4 "$app_path" 2>&1)"
+          printf '%s\n' "$sign_info"
+
+          if ! printf '%s\n' "$sign_info" | grep -q '^Authority=Developer ID Application:'; then
+            echo "::error::Packaged app is not signed with Developer ID Application certificate"
+            exit 1
+          fi
+
+          team_line="$(printf '%s\n' "$sign_info" | grep '^TeamIdentifier=' | head -n1 || true)"
+          team_id="${team_line#TeamIdentifier=}"
+          if [[ -z "$team_id" || "$team_id" == "not set" ]]; then
+            echo "::error::Packaged app TeamIdentifier missing (ad-hoc signature is not allowed)"
+            exit 1
+          fi
+
+          if [[ -n "$expected_team" && "$team_id" != "$expected_team" ]]; then
+            echo "::error::Packaged app TeamIdentifier mismatch: expected=$expected_team actual=$team_id"
+            exit 1
+          fi
+
+          spctl --assess --type execute --verbose=4 "$app_path"
+          spctl --assess --type execute --verbose=4 "$bin_path"
+
+          if [[ "${{ inputs.require_notarization }}" == "true" ]]; then
+            xcrun stapler validate "$dmg"
+            spctl --assess --type open --verbose=4 "$dmg"
+          else
+            echo "Skip notarization-required checks (require_notarization=false)."
+          fi
+
+          echo "Production signature trust checks passed"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
