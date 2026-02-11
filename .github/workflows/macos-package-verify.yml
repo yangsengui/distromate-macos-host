@@ -109,70 +109,70 @@ jobs:
             mkdir -p sample-app/Smoke.app/Contents/Resources
 
             cat > sample-app/Smoke.app/Contents/MacOS/smoke.c <<'EOF'
-            #include <stdio.h>
+          #include <stdio.h>
 
-            int main(void) {
-              puts("Hello from signed app");
-              return 0;
-            }
-            EOF
+          int main(void) {
+            puts("Hello from signed app");
+            return 0;
+          }
+          EOF
 
             clang sample-app/Smoke.app/Contents/MacOS/smoke.c -o sample-app/Smoke.app/Contents/MacOS/smoke
             rm -f sample-app/Smoke.app/Contents/MacOS/smoke.c
             chmod +x sample-app/Smoke.app/Contents/MacOS/smoke
 
             cat > sample-app/Smoke.app/Contents/Info.plist <<'EOF'
-            <?xml version="1.0" encoding="UTF-8"?>
-            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-            <plist version="1.0">
-            <dict>
-              <key>CFBundleName</key>
-              <string>Distromate Smoke Test</string>
-              <key>CFBundleDisplayName</key>
-              <string>Distromate Smoke Test</string>
-              <key>CFBundleIdentifier</key>
-              <string>com.distromate.smoke</string>
-              <key>CFBundleVersion</key>
-              <string>${{ inputs.app_version }}</string>
-              <key>CFBundleShortVersionString</key>
-              <string>${{ inputs.app_version }}</string>
-              <key>CFBundleExecutable</key>
-              <string>smoke</string>
-              <key>CFBundlePackageType</key>
-              <string>APPL</string>
-              <key>LSMinimumSystemVersion</key>
-              <string>12.0</string>
-            </dict>
-            </plist>
-            EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>Distromate Smoke Test</string>
+            <key>CFBundleDisplayName</key>
+            <string>Distromate Smoke Test</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.distromate.smoke</string>
+            <key>CFBundleVersion</key>
+            <string>${{ inputs.app_version }}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${{ inputs.app_version }}</string>
+            <key>CFBundleExecutable</key>
+            <string>smoke</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>12.0</string>
+          </dict>
+          </plist>
+          EOF
 
             cat > sample-app/distromate.yaml <<'EOF'
-            appid: test-appid
-            name: Distromate Smoke Test
-            description: Verify macOS dmg packaging workflow
-            package:
-              name: smoke-app
-              executable: Smoke.app/Contents/MacOS/smoke
-            EOF
+          appid: test-appid
+          name: Distromate Smoke Test
+          description: Verify macOS dmg packaging workflow
+          package:
+            name: smoke-app
+            executable: Smoke.app/Contents/MacOS/smoke
+          EOF
           else
             cat > sample-app/hello.sh <<'EOF'
-            #!/usr/bin/env bash
-            echo "Hello from packaged app"
-            EOF
+          #!/usr/bin/env bash
+          echo "Hello from packaged app"
+          EOF
             chmod +x sample-app/hello.sh
 
             cat > sample-app/readme.txt <<'EOF'
-            distromate package smoke test
-            EOF
+          distromate package smoke test
+          EOF
 
             cat > sample-app/distromate.yaml <<'EOF'
-            appid: test-appid
-            name: Distromate Smoke Test
-            description: Verify macOS dmg packaging workflow
-            package:
-              name: smoke-app
-              executable: hello.sh
-            EOF
+          appid: test-appid
+          name: Distromate Smoke Test
+          description: Verify macOS dmg packaging workflow
+          package:
+            name: smoke-app
+            executable: hello.sh
+          EOF
           fi
 
           ls -la sample-app
