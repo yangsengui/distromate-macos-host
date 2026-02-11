@@ -139,6 +139,10 @@ jobs:
           test -f "$mount_dir/readme.txt"
           test -L "$mount_dir/Applications"
 
+          run_output="$($mount_dir/hello.sh)"
+          echo "Mounted executable output: $run_output"
+          test "$run_output" = "Hello from packaged app"
+
           echo "DMG check passed: $dmg"
 
       - name: Upload package artifact
