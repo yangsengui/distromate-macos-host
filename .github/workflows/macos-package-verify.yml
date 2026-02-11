@@ -39,6 +39,11 @@ on:
         type: boolean
         required: false
         default: false
+      self_signed_signature_checks:
+        description: Enable ad-hoc signature integrity checks (no secrets)
+        type: boolean
+        required: false
+        default: false
       expected_team_id:
         description: Expected TeamIdentifier (optional, recommended)
         required: false
@@ -104,7 +109,7 @@ jobs:
           set -euo pipefail
           mkdir -p sample-app
 
-          if [[ "${{ inputs.production_signature_checks }}" == "true" ]]; then
+          if [[ "${{ inputs.production_signature_checks || inputs.self_signed_signature_checks }}" == "true" ]]; then
             mkdir -p sample-app/Smoke.app/Contents/MacOS
             mkdir -p sample-app/Smoke.app/Contents/Resources
 
@@ -270,13 +275,57 @@ jobs:
           codesign --verify --strict --deep --verbose=4 "$app_path"
           codesign -dv --verbose=4 "$app_path" 2>&1
 
+      - name: Sign sample app with ad-hoc signature
+        if: ${{ inputs.self_signed_signature_checks && !inputs.production_signature_checks }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app_path="sample-app/Smoke.app"
+          codesign --force --deep --sign - "$app_path"
+          codesign --verify --strict --deep --verbose=4 "$app_path"
+
+          app_sign_info="$(codesign -dv --verbose=4 "$app_path" 2>&1)"
+          printf '%s\n' "$app_sign_info"
+
+          if ! printf '%s\n' "$app_sign_info" | grep -q '^Signature=adhoc'; then
+            echo "::error::Sample app is not ad-hoc signed"
+            exit 1
+          fi
+
       - name: Run package command
         shell: bash
         run: |
           set -euo pipefail
           pushd sample-app >/dev/null
-          ../distromate package -v "${{ inputs.app_version }}" -o out --debug
+          ../distromate package -v "${{ inputs.app_version }}" -o out --debug 2>&1 | tee package-command.log
+
+          if [[ "${{ inputs.production_signature_checks || inputs.self_signed_signature_checks }}" == "true" ]]; then
+            grep -q "更新后签名校验通过" package-command.log
+            grep -q "launcher/updater 全量DMG自动更新、拉起与签名校验测试通过" package-command.log
+          fi
+
           popd >/dev/null
+
+      - name: Sign generated DMG with ad-hoc signature
+        if: ${{ inputs.self_signed_signature_checks && !inputs.production_signature_checks }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg="sample-app/out/smoke-app-Setup-${{ inputs.app_version }}.dmg"
+          test -f "$dmg"
+
+          codesign --force --sign - "$dmg"
+          codesign --verify --verbose=4 "$dmg"
+
+          dmg_sign_info="$(codesign -dv --verbose=4 "$dmg" 2>&1)"
+          printf '%s\n' "$dmg_sign_info"
+
+          if ! printf '%s\n' "$dmg_sign_info" | grep -q '^Signature=adhoc'; then
+            echo "::error::Generated DMG is not ad-hoc signed"
+            exit 1
+          fi
 
       - name: Validate notarization secrets
         if: ${{ inputs.production_signature_checks && inputs.require_notarization }}
@@ -340,7 +389,7 @@ jobs:
 
           test -L "$mount_dir/Applications"
 
-          if [[ "${{ inputs.production_signature_checks }}" == "true" ]]; then
+          if [[ "${{ inputs.production_signature_checks || inputs.self_signed_signature_checks }}" == "true" ]]; then
             test -d "$mount_dir/Smoke.app"
             test -f "$mount_dir/Smoke.app/Contents/MacOS/smoke"
             run_output="$("$mount_dir/Smoke.app/Contents/MacOS/smoke")"
@@ -407,6 +456,49 @@ jobs:
           fi
 
           echo "Production signature trust checks passed"
+
+      - name: Verify self-signed signature integrity on packaged assets
+        if: ${{ inputs.self_signed_signature_checks && !inputs.production_signature_checks }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg="sample-app/out/smoke-app-Setup-${{ inputs.app_version }}.dmg"
+          codesign --verify --verbose=4 "$dmg"
+
+          dmg_sign_info="$(codesign -dv --verbose=4 "$dmg" 2>&1)"
+          printf '%s\n' "$dmg_sign_info"
+          if ! printf '%s\n' "$dmg_sign_info" | grep -q '^Signature=adhoc'; then
+            echo "::error::Packaged DMG signature is not ad-hoc"
+            exit 1
+          fi
+
+          mount_dir="$(mktemp -d)"
+          trap 'hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rm -rf "$mount_dir"' EXIT
+
+          hdiutil attach "$dmg" -nobrowse -mountpoint "$mount_dir"
+
+          app_path="$mount_dir/Smoke.app"
+          bin_path="$app_path/Contents/MacOS/smoke"
+
+          codesign --verify --strict --deep --verbose=4 "$app_path"
+          codesign --verify --strict --verbose=4 "$bin_path"
+
+          app_sign_info="$(codesign -dv --verbose=4 "$app_path" 2>&1)"
+          printf '%s\n' "$app_sign_info"
+          if ! printf '%s\n' "$app_sign_info" | grep -q '^Signature=adhoc'; then
+            echo "::error::Packaged app signature is not ad-hoc"
+            exit 1
+          fi
+
+          bin_sign_info="$(codesign -dv --verbose=4 "$bin_path" 2>&1)"
+          printf '%s\n' "$bin_sign_info"
+          if ! printf '%s\n' "$bin_sign_info" | grep -q '^Signature=adhoc'; then
+            echo "::error::Packaged executable signature is not ad-hoc"
+            exit 1
+          fi
+
+          echo "Self-signed signature integrity checks passed"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4

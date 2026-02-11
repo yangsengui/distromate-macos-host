@@ -15,13 +15,26 @@
 3. 在日志里复制 SSH 命令连接到 tmate。
 4. 在会话里手动执行你的打包和测试命令。
 
-## `Verify distromate package (macOS)` 生产级签名校验模式
+## `Verify distromate package (macOS)` 签名校验模式
 
-`macos-package-verify.yml` 新增了可选的生产级签名校验：
+`macos-package-verify.yml` 支持两种签名校验：
 
 - `production_signature_checks`: 启用后会执行 Developer ID 证书链校验 + `spctl` 信任评估。
+- `self_signed_signature_checks`: 启用后使用 ad-hoc（自签）方式做签名完整性校验（不需要 secrets）。
 - `expected_team_id`: 可选，建议填写你的 Team ID（例如 `ABCDE12345`），用于强约束签名主体。
 - `require_notarization`: 启用后会对生成 DMG 执行 notarization 提交、staple、`spctl --type open` 校验。
+
+`self_signed_signature_checks=true` 时，会额外执行：
+
+- 对样例 `Smoke.app` 做 ad-hoc 签名并校验。
+- 对生成的 DMG 做 ad-hoc 签名并校验。
+- 挂载 DMG 后再次校验 `Smoke.app` 和可执行文件签名。
+- 检查 `distromate package` 日志中“更新后签名校验通过”关键信息。
+
+说明：
+
+- 自签模式验证的是“签名存在且更新后仍然正确”，不是 Apple 信任链。
+- 如果同时开启 `production_signature_checks` 和 `self_signed_signature_checks`，以生产级校验为主。
 
 启用 `production_signature_checks=true` 时，必须配置以下 Secrets：
 
@@ -35,7 +48,7 @@
 - `MACOS_NOTARY_TEAM_ID`
 - `MACOS_NOTARY_APP_PASSWORD`
 
-说明：
+通用说明：
 
 - 工作流仍然不 checkout 业务源码，也不会把私有源码上传到公开仓库。
 - 生产级模式会额外校验下载的 `distromate` 二进制签名（拒绝 ad-hoc 签名）。
