@@ -1,0 +1,41 @@
+name: macOS Host (tmate)
+
+on:
+  workflow_dispatch:
+    inputs:
+      macos_version:
+        description: macOS runner version
+        required: true
+        default: macos-14
+        type: choice
+        options:
+          - macos-14
+          - macos-15
+          - macos-13
+      timeout_minutes:
+        description: Session timeout in minutes (max 360)
+        required: true
+        default: "360"
+
+permissions:
+  contents: read
+
+jobs:
+  macos-tmate:
+    name: ${{ inputs.macos_version }} tmate
+    runs-on: ${{ inputs.macos_version }}
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+
+    steps:
+      - name: Show host information
+        run: |
+          echo "Runner: $RUNNER_OS"
+          sw_vers
+          uname -a
+          xcodebuild -version || true
+          brew --version || true
+
+      - name: Start secure tmate session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true

@@ -1,0 +1,8 @@
+# Avoid accidentally committing local test code or secrets
+distromate-cli/
+workspace/
+*.env
+*.key
+*.pem
+*.p12
+*.mobileprovision
