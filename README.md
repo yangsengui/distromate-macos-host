@@ -26,9 +26,9 @@
 
 `self_signed_signature_checks=true` 时，会额外执行：
 
-- 对样例 `Smoke.app` 做 ad-hoc 签名并校验。
+- 对样例 `smoke` 可执行文件做 ad-hoc 签名并校验。
 - 对生成的 DMG 做 ad-hoc 签名并校验。
-- 挂载 DMG 后再次校验 `Smoke.app` 和可执行文件签名。
+- 挂载 DMG 后再次校验 `smoke` 可执行文件签名。
 - 检查 `distromate package` 日志中“更新后签名校验通过”关键信息。
 
 说明：

@@ -110,10 +110,7 @@ jobs:
           mkdir -p sample-app
 
           if [[ "${{ inputs.production_signature_checks || inputs.self_signed_signature_checks }}" == "true" ]]; then
-            mkdir -p sample-app/Smoke.app/Contents/MacOS
-            mkdir -p sample-app/Smoke.app/Contents/Resources
-
-            cat > sample-app/Smoke.app/Contents/MacOS/smoke.c <<'EOF'
+            cat > sample-app/smoke.c <<'EOF'
           #include <stdio.h>
 
           int main(void) {
@@ -122,33 +119,12 @@ jobs:
           }
           EOF
 
-            clang sample-app/Smoke.app/Contents/MacOS/smoke.c -o sample-app/Smoke.app/Contents/MacOS/smoke
-            rm -f sample-app/Smoke.app/Contents/MacOS/smoke.c
-            chmod +x sample-app/Smoke.app/Contents/MacOS/smoke
+            clang sample-app/smoke.c -o sample-app/smoke
+            rm -f sample-app/smoke.c
+            chmod +x sample-app/smoke
 
-            cat > sample-app/Smoke.app/Contents/Info.plist <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleName</key>
-            <string>Distromate Smoke Test</string>
-            <key>CFBundleDisplayName</key>
-            <string>Distromate Smoke Test</string>
-            <key>CFBundleIdentifier</key>
-            <string>com.distromate.smoke</string>
-            <key>CFBundleVersion</key>
-            <string>${{ inputs.app_version }}</string>
-            <key>CFBundleShortVersionString</key>
-            <string>${{ inputs.app_version }}</string>
-            <key>CFBundleExecutable</key>
-            <string>smoke</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>LSMinimumSystemVersion</key>
-            <string>12.0</string>
-          </dict>
-          </plist>
+            cat > sample-app/readme.txt <<'EOF'
+          distromate package signature smoke test
           EOF
 
             cat > sample-app/distromate.yaml <<'EOF'
@@ -157,7 +133,7 @@ jobs:
           description: Verify macOS dmg packaging workflow
           package:
             name: smoke-app
-            executable: Smoke.app/Contents/MacOS/smoke
+            executable: smoke
           EOF
           else
             cat > sample-app/hello.sh <<'EOF'
@@ -262,7 +238,7 @@ jobs:
 
           spctl --assess --type execute --verbose=4 "$target"
 
-      - name: Sign sample app with Developer ID
+      - name: Sign sample executable with Developer ID
         if: ${{ inputs.production_signature_checks }}
         shell: bash
         env:
@@ -270,26 +246,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          app_path="sample-app/Smoke.app"
-          codesign --force --deep --options runtime --timestamp --sign "$MACOS_CODESIGN_IDENTITY" "$app_path"
-          codesign --verify --strict --deep --verbose=4 "$app_path"
-          codesign -dv --verbose=4 "$app_path" 2>&1
+          binary_path="sample-app/smoke"
+          codesign --force --options runtime --timestamp --sign "$MACOS_CODESIGN_IDENTITY" "$binary_path"
+          codesign --verify --strict --verbose=4 "$binary_path"
+          codesign -dv --verbose=4 "$binary_path" 2>&1
 
-      - name: Sign sample app with ad-hoc signature
+      - name: Sign sample executable with ad-hoc signature
         if: ${{ inputs.self_signed_signature_checks && !inputs.production_signature_checks }}
         shell: bash
         run: |
           set -euo pipefail
 
-          app_path="sample-app/Smoke.app"
-          codesign --force --deep --sign - "$app_path"
-          codesign --verify --strict --deep --verbose=4 "$app_path"
+          binary_path="sample-app/smoke"
+          codesign --force --sign - "$binary_path"
+          codesign --verify --strict --verbose=4 "$binary_path"
 
-          app_sign_info="$(codesign -dv --verbose=4 "$app_path" 2>&1)"
+          app_sign_info="$(codesign -dv --verbose=4 "$binary_path" 2>&1)"
           printf '%s\n' "$app_sign_info"
 
           if ! printf '%s\n' "$app_sign_info" | grep -q '^Signature=adhoc'; then
-            echo "::error::Sample app is not ad-hoc signed"
+            echo "::error::Sample executable is not ad-hoc signed"
             exit 1
           fi
 
@@ -390,9 +366,8 @@ jobs:
           test -L "$mount_dir/Applications"
 
           if [[ "${{ inputs.production_signature_checks || inputs.self_signed_signature_checks }}" == "true" ]]; then
-            test -d "$mount_dir/Smoke.app"
-            test -f "$mount_dir/Smoke.app/Contents/MacOS/smoke"
-            run_output="$("$mount_dir/Smoke.app/Contents/MacOS/smoke")"
+            test -f "$mount_dir/smoke"
+            run_output="$("$mount_dir/smoke")"
             echo "Mounted executable output: $run_output"
             test "$run_output" = "Hello from signed app"
           else
@@ -405,7 +380,7 @@ jobs:
 
           echo "DMG check passed: $dmg"
 
-      - name: Verify production signature trust on packaged app
+      - name: Verify production signature trust on packaged executable
         if: ${{ inputs.production_signature_checks }}
         shell: bash
         run: |
@@ -419,33 +394,29 @@ jobs:
 
           hdiutil attach "$dmg" -nobrowse -mountpoint "$mount_dir"
 
-          app_path="$mount_dir/Smoke.app"
-          bin_path="$app_path/Contents/MacOS/smoke"
-
-          codesign --verify --strict --deep --verbose=4 "$app_path"
+          bin_path="$mount_dir/smoke"
           codesign --verify --strict --verbose=4 "$bin_path"
 
-          sign_info="$(codesign -dv --verbose=4 "$app_path" 2>&1)"
+          sign_info="$(codesign -dv --verbose=4 "$bin_path" 2>&1)"
           printf '%s\n' "$sign_info"
 
           if ! printf '%s\n' "$sign_info" | grep -q '^Authority=Developer ID Application:'; then
-            echo "::error::Packaged app is not signed with Developer ID Application certificate"
+            echo "::error::Packaged executable is not signed with Developer ID Application certificate"
             exit 1
           fi
 
           team_line="$(printf '%s\n' "$sign_info" | grep '^TeamIdentifier=' | head -n1 || true)"
           team_id="${team_line#TeamIdentifier=}"
           if [[ -z "$team_id" || "$team_id" == "not set" ]]; then
-            echo "::error::Packaged app TeamIdentifier missing (ad-hoc signature is not allowed)"
+            echo "::error::Packaged executable TeamIdentifier missing (ad-hoc signature is not allowed)"
             exit 1
           fi
 
           if [[ -n "$expected_team" && "$team_id" != "$expected_team" ]]; then
-            echo "::error::Packaged app TeamIdentifier mismatch: expected=$expected_team actual=$team_id"
+            echo "::error::Packaged executable TeamIdentifier mismatch: expected=$expected_team actual=$team_id"
             exit 1
           fi
 
-          spctl --assess --type execute --verbose=4 "$app_path"
           spctl --assess --type execute --verbose=4 "$bin_path"
 
           if [[ "${{ inputs.require_notarization }}" == "true" ]]; then
@@ -478,18 +449,8 @@ jobs:
 
           hdiutil attach "$dmg" -nobrowse -mountpoint "$mount_dir"
 
-          app_path="$mount_dir/Smoke.app"
-          bin_path="$app_path/Contents/MacOS/smoke"
-
-          codesign --verify --strict --deep --verbose=4 "$app_path"
+          bin_path="$mount_dir/smoke"
           codesign --verify --strict --verbose=4 "$bin_path"
-
-          app_sign_info="$(codesign -dv --verbose=4 "$app_path" 2>&1)"
-          printf '%s\n' "$app_sign_info"
-          if ! printf '%s\n' "$app_sign_info" | grep -q '^Signature=adhoc'; then
-            echo "::error::Packaged app signature is not ad-hoc"
-            exit 1
-          fi
 
           bin_sign_info="$(codesign -dv --verbose=4 "$bin_path" 2>&1)"
           printf '%s\n' "$bin_sign_info"
