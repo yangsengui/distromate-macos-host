@@ -112,9 +112,53 @@ jobs:
             "Mantle" \
             "https://github.com/Mantle/Mantle/releases/download/${MANTLE_TAG}/Mantle.framework.zip"
 
+          SQUIRREL_HEADERS_DIR="$FRAMEWORK_DIR/Squirrel.framework/Headers"
+          for header in SQRLDirectoryManager.h SQRLShipItLauncher.h SQRLShipItRequest.h; do
+            url="https://raw.githubusercontent.com/Squirrel/Squirrel.Mac/${SQUIRREL_TAG}/Squirrel/${header}"
+            echo "Downloading Squirrel header: $header"
+            curl -fL "$url" -o "$SQUIRREL_HEADERS_DIR/$header"
+          done
+
           echo "Using frameworks in: $FRAMEWORK_DIR"
           ls -la "$FRAMEWORK_DIR"
           ls -la "$FRAMEWORK_DIR"/*.framework
+          ls -la "$SQUIRREL_HEADERS_DIR"/SQRL*.h
+
+      - name: Resolve target architecture
+        id: arch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FRAMEWORK_DIR="$RUNNER_TEMP/frameworks"
+
+          resolve_arch() {
+            local binary="$1"
+            local archs
+            archs="$(lipo -archs "$binary")"
+            echo "$archs"
+          }
+
+          squirrel_archs="$(resolve_arch "$FRAMEWORK_DIR/Squirrel.framework/Squirrel")"
+          rac_archs="$(resolve_arch "$FRAMEWORK_DIR/ReactiveCocoa.framework/ReactiveCocoa")"
+          mantle_archs="$(resolve_arch "$FRAMEWORK_DIR/Mantle.framework/Mantle")"
+
+          echo "Squirrel archs: $squirrel_archs"
+          echo "ReactiveCocoa archs: $rac_archs"
+          echo "Mantle archs: $mantle_archs"
+
+          target_arch=""
+          if [[ "$squirrel_archs" == *"x86_64"* && "$rac_archs" == *"x86_64"* && "$mantle_archs" == *"x86_64"* ]]; then
+            target_arch="x86_64"
+          elif [[ "$squirrel_archs" == *"arm64"* && "$rac_archs" == *"arm64"* && "$mantle_archs" == *"arm64"* ]]; then
+            target_arch="arm64"
+          else
+            echo "No common architecture across dependency frameworks"
+            exit 1
+          fi
+
+          echo "target_arch=$target_arch" >> "$GITHUB_OUTPUT"
+          echo "Resolved target architecture: $target_arch"
 
       - name: Build mac_squirrel_agent
         shell: bash
@@ -123,6 +167,7 @@ jobs:
           mkdir -p out
 
           SQUIRREL_FRAMEWORK_DIR="$RUNNER_TEMP/frameworks" \
+          MAC_SQUIRREL_AGENT_ARCH="${{ steps.arch.outputs.target_arch }}" \
           REACTIVE_FRAMEWORK=ReactiveCocoa \
           bash libs/mac-squirrel-agent/build.sh out/mac_squirrel_agent
 
