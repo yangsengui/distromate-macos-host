@@ -1,0 +1,304 @@
+name: Verify real app update flow (macOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: macOS runner version
+        required: true
+        default: macos-14
+        type: choice
+        options:
+          - macos-14
+          - macos-15
+          - macos-13
+      squirrel_version:
+        description: Squirrel.Mac release tag
+        required: true
+        default: 0.3.2
+      reactivecocoa_version:
+        description: ReactiveCocoa release tag
+        required: true
+        default: v2.5
+      mantle_version:
+        description: Mantle release tag
+        required: true
+        default: 2.0.7
+      debug_enabled:
+        description: Start tmate session after failure
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify-update:
+    name: Verify update on ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show host information
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -a
+          xcodebuild -version
+          clang --version
+
+      - name: Download dependency frameworks
+        shell: bash
+        env:
+          SQUIRREL_TAG: ${{ inputs.squirrel_version }}
+          RAC_TAG: ${{ inputs.reactivecocoa_version }}
+          MANTLE_TAG: ${{ inputs.mantle_version }}
+        run: |
+          set -euo pipefail
+
+          FRAMEWORK_DIR="$RUNNER_TEMP/frameworks"
+          mkdir -p "$FRAMEWORK_DIR"
+
+          download_framework_zip() {
+            local name="$1"
+            local url="$2"
+            local zip_path="$RUNNER_TEMP/${name}.zip"
+            local unpack_dir="$RUNNER_TEMP/${name}-unpack"
+
+            rm -rf "$zip_path" "$unpack_dir"
+            mkdir -p "$unpack_dir"
+
+            echo "Downloading $name from: $url"
+            curl -fL "$url" -o "$zip_path"
+            unzip -q "$zip_path" -d "$unpack_dir"
+
+            local copied=0
+            shopt -s nullglob
+            for candidate in "$unpack_dir"/Carthage/Build/Mac/*.framework "$unpack_dir"/*.framework; do
+              echo "Installing $(basename "$candidate")"
+              rm -rf "$FRAMEWORK_DIR/$(basename "$candidate")"
+              ditto "$candidate" "$FRAMEWORK_DIR/$(basename "$candidate")"
+              copied=1
+            done
+            shopt -u nullglob
+
+            if [[ "$copied" -eq 0 ]]; then
+              echo "No framework found in archive: $name"
+              exit 1
+            fi
+          }
+
+          download_framework_zip \
+            "Squirrel" \
+            "https://github.com/Squirrel/Squirrel.Mac/releases/download/${SQUIRREL_TAG}/Squirrel.framework.zip"
+
+          download_framework_zip \
+            "ReactiveCocoa" \
+            "https://github.com/ReactiveCocoa/ReactiveCocoa/releases/download/${RAC_TAG}/ReactiveCocoa.framework.zip"
+
+          download_framework_zip \
+            "Mantle" \
+            "https://github.com/Mantle/Mantle/releases/download/${MANTLE_TAG}/Mantle.framework.zip"
+
+          SQUIRREL_HEADERS_DIR="$FRAMEWORK_DIR/Squirrel.framework/Headers"
+          for header in SQRLDirectoryManager.h SQRLShipItLauncher.h SQRLShipItRequest.h; do
+            url="https://raw.githubusercontent.com/Squirrel/Squirrel.Mac/${SQUIRREL_TAG}/Squirrel/${header}"
+            echo "Downloading Squirrel header: $header"
+            curl -fL "$url" -o "$SQUIRREL_HEADERS_DIR/$header"
+          done
+
+          ls -la "$FRAMEWORK_DIR"/*.framework
+          ls -la "$SQUIRREL_HEADERS_DIR"/SQRL*.h
+
+      - name: Resolve target architecture
+        id: arch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FRAMEWORK_DIR="$RUNNER_TEMP/frameworks"
+
+          squirrel_archs="$(lipo -archs "$FRAMEWORK_DIR/Squirrel.framework/Squirrel")"
+          rac_archs="$(lipo -archs "$FRAMEWORK_DIR/ReactiveCocoa.framework/ReactiveCocoa")"
+          mantle_archs="$(lipo -archs "$FRAMEWORK_DIR/Mantle.framework/Mantle")"
+
+          echo "Squirrel archs: $squirrel_archs"
+          echo "ReactiveCocoa archs: $rac_archs"
+          echo "Mantle archs: $mantle_archs"
+
+          target_arch=""
+          if [[ "$squirrel_archs" == *"x86_64"* && "$rac_archs" == *"x86_64"* && "$mantle_archs" == *"x86_64"* ]]; then
+            target_arch="x86_64"
+          elif [[ "$squirrel_archs" == *"arm64"* && "$rac_archs" == *"arm64"* && "$mantle_archs" == *"arm64"* ]]; then
+            target_arch="arm64"
+          else
+            echo "No common architecture across dependency frameworks"
+            exit 1
+          fi
+
+          echo "target_arch=$target_arch" >> "$GITHUB_OUTPUT"
+          echo "Resolved target architecture: $target_arch"
+
+      - name: Build mac_squirrel_agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          SQUIRREL_FRAMEWORK_DIR="$RUNNER_TEMP/frameworks" \
+          MAC_SQUIRREL_AGENT_ARCH="${{ steps.arch.outputs.target_arch }}" \
+          REACTIVE_FRAMEWORK=ReactiveCocoa \
+          bash libs/mac-squirrel-agent/build.sh out/mac_squirrel_agent
+
+          test -f out/mac_squirrel_agent
+          file out/mac_squirrel_agent
+          otool -L out/mac_squirrel_agent
+
+      - name: Prepare real .app bundles
+        id: prepare_apps
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          create_demo_app() {
+            local app_dir="$1"
+            local short_version="$2"
+            local build_version="$3"
+
+            rm -rf "$app_dir"
+            mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
+
+            cat > "$app_dir/Contents/MacOS/DemoUpdateApp" <<'EOF'
+#!/usr/bin/env bash
+echo "demo-version=__VERSION__"
+EOF
+            perl -pi -e "s/__VERSION__/${short_version}/g" "$app_dir/Contents/MacOS/DemoUpdateApp"
+            chmod +x "$app_dir/Contents/MacOS/DemoUpdateApp"
+
+            cat > "$app_dir/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>DemoUpdateApp</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.distromate.demo</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>DemoUpdateApp</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>${short_version}</string>
+  <key>CFBundleVersion</key>
+  <string>${build_version}</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+</dict>
+</plist>
+EOF
+
+            codesign --force --deep --sign - "$app_dir"
+          }
+
+          old_app="$RUNNER_TEMP/demo-v1/DemoUpdateApp.app"
+          new_app="$RUNNER_TEMP/demo-v2/DemoUpdateApp.app"
+
+          create_demo_app "$old_app" "1.0.0" "100"
+          create_demo_app "$new_app" "2.0.0" "200"
+
+          target_root="$RUNNER_TEMP/Applications"
+          target_app="$target_root/DemoUpdateApp.app"
+          mkdir -p "$target_root"
+          rm -rf "$target_app"
+          ditto "$old_app" "$target_app"
+
+          echo "old_app=$old_app" >> "$GITHUB_OUTPUT"
+          echo "new_app=$new_app" >> "$GITHUB_OUTPUT"
+          echo "target_app=$target_app" >> "$GITHUB_OUTPUT"
+
+      - name: Run real update flow
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          helper="$GITHUB_WORKSPACE/out/mac_squirrel_agent"
+          target_app="${{ steps.prepare_apps.outputs.target_app }}"
+          staged_app="${{ steps.prepare_apps.outputs.new_app }}"
+          bundle_id="com.distromate.demo"
+
+          before_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$target_app/Contents/Info.plist")"
+          before_output="$("$target_app/Contents/MacOS/DemoUpdateApp")"
+
+          echo "before version: $before_version"
+          echo "before output: $before_output"
+
+          "$helper" \
+            --staged-app "$staged_app" \
+            --target-app "$target_app" \
+            --bundle-id "$bundle_id"
+
+          updated=0
+          for _ in {1..120}; do
+            sleep 1
+            current_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$target_app/Contents/Info.plist" 2>/dev/null || true)"
+            if [[ "$current_version" == "2.0.0" ]]; then
+              updated=1
+              break
+            fi
+          done
+
+          after_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$target_app/Contents/Info.plist")"
+          after_output="$("$target_app/Contents/MacOS/DemoUpdateApp")"
+
+          echo "after version: $after_version"
+          echo "after output: $after_output"
+
+          if [[ "$updated" -ne 1 ]]; then
+            echo "ShipIt update did not complete in time"
+            exit 1
+          fi
+
+          test "$after_version" = "2.0.0"
+          test "$after_output" = "demo-version=2.0.0"
+
+      - name: Collect diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p diagnostics
+          cp out/mac_squirrel_agent diagnostics/
+
+          if [[ -d "$HOME/Library/Caches" ]]; then
+            shopt -s nullglob
+            for shipit_dir in "$HOME/Library/Caches"/*ShipIt*; do
+              name="$(basename "$shipit_dir")"
+              tar -czf "diagnostics/${name}.tar.gz" -C "$(dirname "$shipit_dir")" "$name" || true
+            done
+            shopt -u nullglob
+          fi
+
+      - name: Upload diagnostics artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-update-diagnostics-${{ inputs.runner }}
+          path: diagnostics/
+          if-no-files-found: error
+
+      - name: Start tmate session for debug
+        if: ${{ failure() && inputs.debug_enabled }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
