@@ -159,18 +159,43 @@ jobs:
           file out/mac_squirrel_agent
           otool -L out/mac_squirrel_agent
 
-      - name: Prepare helper runtime frameworks
+      - name: Prepare helper host app
+        id: helper_host
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p out/Frameworks
+          helper_app="$GITHUB_WORKSPACE/out/HelperHost.app"
+          helper_exec="$helper_app/Contents/MacOS/mac_squirrel_agent"
+          helper_frameworks="$helper_app/Contents/Frameworks"
+
+          rm -rf "$helper_app"
+          mkdir -p "$helper_app/Contents/MacOS" "$helper_frameworks"
+
+          cp "$GITHUB_WORKSPACE/out/mac_squirrel_agent" "$helper_exec"
+          chmod +x "$helper_exec"
+
           for framework in Squirrel ReactiveCocoa Mantle; do
             src="$RUNNER_TEMP/frameworks/${framework}.framework"
-            dst="out/Frameworks/${framework}.framework"
+            dst="$helper_frameworks/${framework}.framework"
             rm -rf "$dst"
             ditto "$src" "$dst"
           done
+
+          plist="$helper_app/Contents/Info.plist"
+          plutil -create xml1 "$plist"
+          /usr/libexec/PlistBuddy -c 'Clear dict' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleDevelopmentRegion string en' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleExecutable string mac_squirrel_agent' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string com.distromate.demo' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleInfoDictionaryVersion string 6.0' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleName string HelperHost' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundlePackageType string APPL' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleShortVersionString string 1.0.0' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleVersion string 1' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :LSMinimumSystemVersion string 11.0' "$plist"
+
+          echo "helper_exec=$helper_exec" >> "$GITHUB_OUTPUT"
 
       - name: Prepare real .app bundles
         id: prepare_apps
@@ -226,7 +251,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          helper="$GITHUB_WORKSPACE/out/mac_squirrel_agent"
+          helper="${{ steps.helper_host.outputs.helper_exec }}"
           target_app="${{ steps.prepare_apps.outputs.target_app }}"
           staged_app="${{ steps.prepare_apps.outputs.new_app }}"
           bundle_id="com.distromate.demo"
