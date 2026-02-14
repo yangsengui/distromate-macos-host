@@ -12,6 +12,20 @@
 #error "ReactiveObjC/ReactiveCocoa headers are required"
 #endif
 
+@implementation SQRLShipItRequest (DistromateJSONCompat)
+
++ (NSDictionary *)JSONKeyPathsByPropertyKey {
+  return @{
+    @"updateBundleURL" : @"updateBundleURL",
+    @"targetBundleURL" : @"targetBundleURL",
+    @"bundleIdentifier" : @"bundleIdentifier",
+    @"launchAfterInstallation" : @"launchAfterInstallation",
+    @"useUpdateBundleName" : @"useUpdateBundleName",
+  };
+}
+
+@end
+
 static void PrintUsage(void) {
   fprintf(stderr,
           "Usage: mac_squirrel_agent --staged-app <path> --target-app <path> "
