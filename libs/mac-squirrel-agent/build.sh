@@ -12,12 +12,21 @@ if [[ -n "$TARGET_ARCH" ]]; then
   ARCH_FLAGS=(-arch "$TARGET_ARCH")
 fi
 
+RPATH_FLAGS=(
+  -Wl,-rpath,@executable_path/Frameworks
+  -Wl,-rpath,@loader_path/Frameworks
+  -Wl,-rpath,@executable_path/../Frameworks
+  -Wl,-rpath,@loader_path/../Frameworks
+  -Wl,-rpath,/Library/Frameworks
+)
+
 clang "${ARCH_FLAGS[@]}" -fobjc-arc -ObjC "$SCRIPT_DIR/mac_squirrel_agent.m" \
   -F"$FRAMEWORK_DIR" \
   -framework Foundation \
   -framework Squirrel \
   -framework "$REACTIVE_FRAMEWORK" \
   -framework Mantle \
+  "${RPATH_FLAGS[@]}" \
   -o "$OUT"
 
 echo "built: $OUT"

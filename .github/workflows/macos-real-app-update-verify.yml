@@ -159,6 +159,19 @@ jobs:
           file out/mac_squirrel_agent
           otool -L out/mac_squirrel_agent
 
+      - name: Prepare helper runtime frameworks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p out/Frameworks
+          for framework in Squirrel ReactiveCocoa Mantle; do
+            src="$RUNNER_TEMP/frameworks/${framework}.framework"
+            dst="out/Frameworks/${framework}.framework"
+            rm -rf "$dst"
+            ditto "$src" "$dst"
+          done
+
       - name: Prepare real .app bundles
         id: prepare_apps
         shell: bash
