@@ -227,7 +227,13 @@ jobs:
             /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string ${build_version}" "$plist"
             /usr/libexec/PlistBuddy -c 'Add :LSMinimumSystemVersion string 11.0' "$plist"
 
-            codesign --force --deep --sign - "$app_dir"
+            codesign \
+              --force \
+              --deep \
+              --sign - \
+              --identifier com.distromate.demo \
+              --requirements '=designated => identifier "com.distromate.demo"' \
+              "$app_dir"
           }
 
           old_app="$RUNNER_TEMP/demo-v1/DemoUpdateApp.app"
