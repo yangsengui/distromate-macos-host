@@ -1,0 +1,149 @@
+name: Build mac_squirrel_agent (macOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: macOS runner version
+        required: true
+        default: macos-14
+        type: choice
+        options:
+          - macos-14
+          - macos-15
+          - macos-13
+      squirrel_version:
+        description: Squirrel.Mac release tag
+        required: true
+        default: 0.3.2
+      reactivecocoa_version:
+        description: ReactiveCocoa release tag
+        required: true
+        default: v2.5
+      mantle_version:
+        description: Mantle release tag
+        required: true
+        default: 2.0.7
+      debug_enabled:
+        description: Start tmate session after failure
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build on ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f libs/mac-squirrel-agent/build.sh
+          test -f libs/mac-squirrel-agent/mac_squirrel_agent.m
+
+      - name: Show host information
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -a
+          xcodebuild -version
+          clang --version
+
+      - name: Download dependency frameworks
+        shell: bash
+        env:
+          SQUIRREL_TAG: ${{ inputs.squirrel_version }}
+          RAC_TAG: ${{ inputs.reactivecocoa_version }}
+          MANTLE_TAG: ${{ inputs.mantle_version }}
+        run: |
+          set -euo pipefail
+
+          FRAMEWORK_DIR="$RUNNER_TEMP/frameworks"
+          mkdir -p "$FRAMEWORK_DIR"
+
+          download_framework_zip() {
+            local name="$1"
+            local url="$2"
+            local zip_path="$RUNNER_TEMP/${name}.zip"
+            local unpack_dir="$RUNNER_TEMP/${name}-unpack"
+
+            rm -rf "$zip_path" "$unpack_dir"
+            mkdir -p "$unpack_dir"
+
+            echo "Downloading $name from: $url"
+            curl -fL "$url" -o "$zip_path"
+            unzip -q "$zip_path" -d "$unpack_dir"
+
+            local copied=0
+            shopt -s nullglob
+            for candidate in "$unpack_dir"/Carthage/Build/Mac/*.framework "$unpack_dir"/*.framework; do
+              echo "Installing $(basename "$candidate")"
+              rm -rf "$FRAMEWORK_DIR/$(basename "$candidate")"
+              ditto "$candidate" "$FRAMEWORK_DIR/$(basename "$candidate")"
+              copied=1
+            done
+            shopt -u nullglob
+
+            if [[ "$copied" -eq 0 ]]; then
+              echo "No framework found in archive: $name"
+              exit 1
+            fi
+          }
+
+          download_framework_zip \
+            "Squirrel" \
+            "https://github.com/Squirrel/Squirrel.Mac/releases/download/${SQUIRREL_TAG}/Squirrel.framework.zip"
+
+          download_framework_zip \
+            "ReactiveCocoa" \
+            "https://github.com/ReactiveCocoa/ReactiveCocoa/releases/download/${RAC_TAG}/ReactiveCocoa.framework.zip"
+
+          download_framework_zip \
+            "Mantle" \
+            "https://github.com/Mantle/Mantle/releases/download/${MANTLE_TAG}/Mantle.framework.zip"
+
+          echo "Using frameworks in: $FRAMEWORK_DIR"
+          ls -la "$FRAMEWORK_DIR"
+          ls -la "$FRAMEWORK_DIR"/*.framework
+
+      - name: Build mac_squirrel_agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          SQUIRREL_FRAMEWORK_DIR="$RUNNER_TEMP/frameworks" \
+          REACTIVE_FRAMEWORK=ReactiveCocoa \
+          bash libs/mac-squirrel-agent/build.sh out/mac_squirrel_agent
+
+          test -f out/mac_squirrel_agent
+
+      - name: Inspect build output
+        shell: bash
+        run: |
+          set -euo pipefail
+          file out/mac_squirrel_agent
+          otool -L out/mac_squirrel_agent
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-squirrel-agent-${{ inputs.runner }}
+          path: out/mac_squirrel_agent
+          if-no-files-found: error
+
+      - name: Start tmate session for debug
+        if: ${{ failure() && inputs.debug_enabled }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
